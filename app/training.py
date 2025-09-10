@@ -9,6 +9,7 @@ from torch.utils.data import Dataset, DataLoader
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.utils.prune as prune
 import pytorch_warmup as warmup
 from sklearn import preprocessing
 from sklearn.model_selection import train_test_split
@@ -156,9 +157,9 @@ class EOGDataset(Dataset):
     
 class Trainer:
     def __init__(self, model: nn.Module, train_loader: DataLoader, val_loader: DataLoader, 
-                 device: torch.device, lr: float = 1e-4):
+                 device: torch.device, epoch: int, lr: float = 1e-4):
         self.gradient_flow = []
-        self.iters = len(train_loader) * 100
+        self.iters = len(train_loader) * epoch
         self.classes = ('0', '1', '2', '3', '4')
         self.regulizer = "L2"
         self.lambda_req = 0.01
@@ -168,6 +169,7 @@ class Trainer:
         self.val_loader = val_loader
         self.device = device
         self.lr = lr
+        self.save_model = SaveBestModel()
         self.optimizer = optim.Adam(self.model.parameters(),lr= self.lr)
         self.criterion = nn.CrossEntropyLoss()
         # Define LR scheduler and warmup scheduler
@@ -180,12 +182,12 @@ class Trainer:
         self.train_accuracies = []
         self.val_accuracies = []
 
-        def train_epoch(self):
+        def train_epoch(self) -> Tuple[float, float]:
             self.model.train()
             train_loss = 0
             train_correct = 0
             train_total = 0
-            wandb.watch(self.model, self.loss, log = "all")
+            wandb.watch(self.model, self.criterion, log = "all")
             progress_bar  = tqdm(self.train_loader, desc= "Training")
             for idx, (data, target) in enumerate(progress_bar):
                 data, target = data.to(self.device), target.to(self.device)
@@ -193,19 +195,117 @@ class Trainer:
                 # Forward pass
                 self.optimizer.zero_grad()
                 output = self.model(data)
-                loss = self.criterion(output, target)
+                loss_score = self.criterion(output, target)
+                # Regulizer
                 if self.regulizer == "L2":
                     L2_norm = sum(param.pow(2).sum() for param in self.model.parameters())
                     loss_score += self.lambda_req * L2_norm
                 elif self.regulizer == "L1":
                     L1_norm = sum(param.abs().sum() for param in self.model.parameters())
                     loss_score += self.lambda_req * L1_norm
+                train_loss += loss_score.item()
+
+                # Calculate accuracy
+                _, prediction = torch.max(output.data, 1)
+                train_total += target.size(0)
+                train_correct += (prediction == target).sum().item()
+
+                #  Backward pass
+                loss_score.backward()
+                self.optimizer.step()
+                with self.warmup_scheduler.dampening():
+                    self.lr_scheduler.step()
                     
+                # Prunning if necessary (Prune for every 10 epochs for  only Conv1d and Linear layers)
+                if self.pruning:
+                    if (epoch + 1) % 10 == 0:
+                        for name, module in self.model.named_modules():
+                            if isinstance(module, nn.Conv1d) or isinstance(module, nn.Linear):
+                                prune.l1_unstructured(module, name = "weight", amount= 0.1)
+                                prune.remove(module= module, name = "weight")
+                
+            # Log back to wandb and progress bar
+            current_lr = self.optimizer.param_groups[0]['lr']
+            train_accuracy = round((train_correct / train_total)*100, 4)
+            wandb.log({'Train Loss': loss_score.item(), "Train Accuracy": train_accuracy, "Learning Rate": current_lr})
+            progress_bar.set_postfix({ 
+                "Loss": f"{loss_score.item():.4f}",
+                "Accuracy": f"{train_accuracy}"})
 
-            pass
+            return train_loss / len(self.train_loader), train_accuracy 
+        
 
+        def val_epoch(self) -> Tuple[float, float]:
+            self.model.eval()
+            val_loss = 0
+            val_correct = 0
+            val_total = 0
+            with torch.no_grad():
+                progress_bar = tqdm(self.val_loader, desc = "Validation")
+                for idx, (data, target) in enumerate(progress_bar):
+                    data, target = data.to(self.device), target.to(self.device)
+
+                    output = self.model(data)
+                    loss_score = self.criterion(output, target)
+                    val_loss += loss_score.item()
+                    _, prediction = torch.max(output.data, 1)
+                    val_total += target.size(0)
+                    val_correct += (prediction == target).sum().item()
+                # Log back to wandb and progress bar
+                val_accuracy =  round((val_correct / val_total)* 100, 4)
+                wandb.log({
+                    'Validation Loss': val_loss/val_total,
+                    'Validation Overall Loss': val_loss/len(test_loader), 
+                    'Validation Accuracy': val_accuracy
+                })
+
+                progress_bar.set_postfix({
+                    "Loss": f"{loss_score.item():.4f}",
+                    "Accuracy": f"{val_accuracy}"
+                })
+
+            return val_loss / len(self.val_loader), val_accuracy
+        
+        def train(self, num_epochs: int):
+            print(f"Starting training for {num_epochs} epochs...")
+
+            for epoch in range(num_epochs):
+                print(f'\nEpoch {epoch+1}/{num_epochs}')
+                print('-' * 50)
+
+                train_loss, train_accuracy = self.train_epoch()
+                val_loss, val_accuracy = self.val_epoch()
+
+                # Save metrics
+                self.train_losses.append(train_loss)
+                self.val_losses.append(val_loss)
+                self.train_accuracies.append(train_accuracy)
+                self.val_accuracies.append(val_accuracy)
+                # Print epoch results
+                print(f'Train Loss: {train_loss:.4f}, Train Acc: {train_accuracy:.4f}')
+                print(f'Val Loss: {val_loss:.4f}, Val Acc: {val_accuracy:.4f}')
+
+                # Save the best model
+                self.save_model(val_accuracy, epoch,
+                                self.model, self.optimizer, self.criterion)
+            return self.train_losses, self.val_losses, self.train_accuracies, self.val_accuracies
+        
     
 
+class SaveBestModel():
+  def __init__(self, best_valid_accuracy=float('-inf')):
+    self.best_valid_accuracy = best_valid_accuracy
+  def __call__(self, current_valid_accuracy, epoch, model, optimizer, criterion):
+    if current_valid_accuracy > self.best_valid_accuracy:
+      self.best_valid_accuracy = current_valid_accuracy
+      print(f"\nBest validation accuracy: {self.best_valid_accuracy}")
+      print(f"\nSaving best model for epoch: {epoch}\n")
+      torch.save({
+          'epoch': epoch,
+          'model_state_dict': model.state_dict(),
+          'optimizer_state_dict': optimizer.state_dict(),
+          'loss': criterion,
+      }, 'best_model.pth')
 
 
 
