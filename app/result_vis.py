@@ -2,10 +2,10 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import plotly.express as px
 import plotly.graph_objects as go
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, roc_curve
 import numpy  as np
 import pandas as pd
 import torch
-from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, roc_curve
 from io import BytesIO
 import base64
 import neurokit2 as nk
@@ -257,14 +257,14 @@ def plot_classification_report(true_label: List[Any], pred_label: List[Any], ax:
     ax.tick_params(axis='both', which='both', length=0)
 #############################################################################
                 # For the visualization in test prediction #
-def calculate_tpr_fpr(y_real: List[int], y_pred: List[int]) -> Tuple[float, float]:
+def calculate_tpr_fpr(y_real: np.ndarray, y_pred: np.ndarray) -> Tuple[float, float]:
     cm = confusion_matrix(y_real, y_pred)
     tn, fp, fn, tp = cm.ravel()
     tpr = tp / (tp + fn)
     fpr = fp / (fp + tn)
     return tpr, fpr
 
-def get_roc_coordinate(y_real: List[int], y_proba: List[float]) -> Tuple[List[float], List[float]]:
+def get_roc_coordinate(y_real: np.ndarray, y_proba: np.ndarray) -> Tuple[List[float], List[float]]:
     fpr, tpr, _ = roc_curve(y_real, y_proba)
     return fpr.tolist(), tpr.tolist()
 
@@ -296,7 +296,6 @@ def plot_confidence_hist(prediction_output: torch.Tensor):
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.show()
 
 def plot_class_distribution(predicted_labels: np.ndarray, num_classes: int):
     match num_classes:
@@ -330,7 +329,7 @@ def plot_class_distribution(predicted_labels: np.ndarray, num_classes: int):
 
     plt.grid(axis='y', alpha=0.3)
     plt.tight_layout()
-    plt.show()
+   
 
 def plot_entropy(prediction_output: torch.Tensor):
     from scipy.stats import entropy
@@ -343,7 +342,6 @@ def plot_entropy(prediction_output: torch.Tensor):
     plt.ylabel('Number of Samples')
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.show()
     
 def plot_violin(prediction_output: torch.Tensor, predicted_labels: np.ndarray, num_classes: int):
     match num_classes:
@@ -372,7 +370,6 @@ def plot_violin(prediction_output: torch.Tensor, predicted_labels: np.ndarray, n
     plt.ylabel('Confidence (Probability)')
     plt.grid(axis='y', alpha=0.3)
     plt.tight_layout()
-    plt.show()
 
 def plot_3d_scatter(prediction_output: torch.Tensor, predicted_labels: np.ndarray, num_classes: int):
     match num_classes:
@@ -455,4 +452,3 @@ def probability_roc_curve(test_tensor: torch.Tensor, predicted_labels: np.ndarra
 
         roc_auc_ovr[c] = roc_auc_score(df_aux["class"], df_aux["prob"])
         plt.tight_layout()
-        plt.show()
